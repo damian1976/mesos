@@ -729,7 +729,7 @@ protected:
       if (duration1 == Nanoseconds(0))
         minimum = duration2;
       else if (duration2 == Nanoseconds(0))
-    	minimum = duration1;
+        minimum = duration1;
       else
         minimum = duration1 < duration2 ? duration1 : duration2;
 
