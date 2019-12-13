@@ -35,6 +35,8 @@ namespace slave {
 constexpr Duration EXECUTOR_REGISTRATION_TIMEOUT = Minutes(1);
 constexpr Duration EXECUTOR_REREGISTRATION_TIMEOUT = Seconds(2);
 
+constexpr Duration DEFAULT_MAX_TIME_RESOURCES_AVAILABILITY = Hours(1);
+
 // The maximum timeout within which an executor can reregister.
 // Note that this value has to be << 'MIN_AGENT_REREGISTER_TIMEOUT'
 // declared in 'master/constants.hpp'; since agent recovery will only
@@ -52,6 +54,7 @@ constexpr Duration DEFAULT_EXECUTOR_SHUTDOWN_GRACE_PERIOD = Seconds(5);
 constexpr Duration DEFAULT_EXECUTOR_HEARTBEAT_INTERVAL = Minutes(30);
 
 constexpr Duration RECOVERY_TIMEOUT = Minutes(15);
+
 
 // TODO(gkleiman): Move this to a different file once `TaskStatusUpdateManager`
 // uses `StatusUpdateManagerProcess`. See MESOS-8296.

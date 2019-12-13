@@ -73,7 +73,7 @@ public:
   std::string launcher_dir;
   Option<std::string> hadoop_home;
   size_t max_completed_executors_per_framework;
-
+  Duration max_time_resources_availability;
 #ifndef __WINDOWS__
   bool switch_user;
   Option<std::string> volume_gid_range;

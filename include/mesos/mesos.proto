@@ -796,6 +796,11 @@ message ExecutorInfo {
   // labels should be used to tag executors with lightweight metadata.
   // Labels should not contain duplicate key-value pairs.
   optional Labels labels = 14;
+  
+  // Maximum task running time for tasks belonging to given agent.
+  // Upon exceed the task will be shutdown 
+  optional DurationInfo max_time_resources_availability_period = 16;
+  
 }
 
 

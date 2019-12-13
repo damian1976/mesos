@@ -703,20 +703,45 @@ protected:
     foreachvalue (const Environment::Variable& variable, environment) {
       launchEnvironment.add_variables()->CopyFrom(variable);
     }
+    LOG(INFO) << "Returning environment: " << launchEnvironment.ShortDebugString();
+
+    Duration maxTimeResourcesAvailability = DEFAULT_MAX_TIME_RESOURCES_AVAILABILITY;
+    Option<string> value = os::getenv("MESOS_MAX_TIME_RESOURCES_AVAILABILITY");
+    if (value.isSome()) {
+      Try<Duration> parse = Duration::parse(value.get());
+      if (parse.isError()) {
+        EXIT(EXIT_FAILURE)
+          << "Failed to parse value '" << value.get() << "'"
+          << " of 'MESOS_MAX_TIME_RESOURCES_AVAILABILITY': " << parse.error();
+      }
+
+        maxTimeResourcesAvailability = parse.get();
+    }
+
+    LOG(INFO) << "Task max time resource availability: " << maxTimeResourcesAvailability;
 
     // Setup timer for max_completion_time.
-    if (task.max_completion_time().nanoseconds() > 0) {
-      Duration duration = Nanoseconds(task.max_completion_time().nanoseconds());
+    if (task.max_completion_time().nanoseconds() > 0 || Nanoseconds(maxTimeResourcesAvailability).value() > 0) {
+      Duration duration1 = Nanoseconds(task.max_completion_time().nanoseconds());
+      Duration duration2 = Nanoseconds(maxTimeResourcesAvailability);
+      Duration minimum = Nanoseconds(0);
+
+      if (duration1 == Nanoseconds(0))
+        minimum = duration2;
+      else if (duration2 == Nanoseconds(0))
+    	minimum = duration1;
+      else
+        minimum = duration1 < duration2 ? duration1 : duration2;
 
       LOG(INFO) << "Task " << taskId.get() << " has a max completion time of "
-                << duration;
+                << minimum;
 
       taskCompletionTimer = delay(
-          duration,
+          minimum,
           self(),
           &Self::taskCompletionTimeout,
           task.task_id(),
-          duration);
+          minimum);
     }
 
     LOG(INFO) << "Starting task " << taskId.get();

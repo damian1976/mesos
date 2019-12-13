@@ -300,7 +300,27 @@ public:
         << "Expecting 'MESOS_EXECUTOR_SHUTDOWN_GRACE_PERIOD' to be set"
         << " in the environment";
     }
+
+
+    // Get max time resource availability from the environment.
+        value = env.get("MESOS_MAX_TIME_RESOURCES_AVAILABILITY");
+        if (value.isSome()) {
+          Try<Duration> _maxTimeResourcesAvailability = Duration::parse(value.get());
+
+          CHECK_SOME(_maxTimeResourcesAvailability)
+              << "Failed to parse MESOS_MAX_TIME_RESOURCES_AVAILABILITY '"
+              << value.get() << "': " << _maxTimeResourcesAvailability.error();
+
+          maxTimeResourcesAvailability = _maxTimeResourcesAvailability.get();
+        } else {
+          EXIT(EXIT_FAILURE)
+            << "Expecting 'MESOS_MAX_TIME_RESOURCES_AVAILABILITY' to be set"
+            << " in the environment";
+
+        }
+
   }
+
 
   void send(const Call& call)
   {
@@ -859,6 +879,7 @@ private:
   Option<Duration> maxBackoff;
   Option<Timer> recoveryTimer;
   Duration shutdownGracePeriod;
+  Duration maxTimeResourcesAvailability;
   Option<string> authenticationToken;
 };
 

@@ -11103,6 +11103,15 @@ map<string, string> executorEnvironment(
   environment["MESOS_EXECUTOR_SHUTDOWN_GRACE_PERIOD"] =
     stringify(executorShutdownGracePeriod);
 
+  Duration maxTimeResourcesAvailability = flags.max_time_resources_availability;
+  if (executorInfo.has_max_time_resources_availability_period()) {
+    maxTimeResourcesAvailability =
+      Nanoseconds(executorInfo.max_time_resources_availability_period().nanoseconds());
+  }
+
+   environment["MESOS_MAX_TIME_RESOURCES_AVAILABILITY"] =
+     stringify(maxTimeResourcesAvailability);
+
   if (checkpoint) {
     environment["MESOS_RECOVERY_TIMEOUT"] = stringify(flags.recovery_timeout);
 

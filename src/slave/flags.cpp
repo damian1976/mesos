@@ -583,6 +583,11 @@ mesos::internal::slave::Flags::Flags()
       "in memory.\n",
       DEFAULT_MAX_COMPLETED_EXECUTORS_PER_FRAMEWORK);
 
+  add(&Flags::max_time_resources_availability,
+        "max_time_resources_availability",
+        "Maximum amount of time after which the task will be shutdown\n",
+        DEFAULT_MAX_TIME_RESOURCES_AVAILABILITY);
+
 #ifdef __linux__
   add(&Flags::cgroups_destroy_timeout,
       "cgroups_destroy_timeout",
