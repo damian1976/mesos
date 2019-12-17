@@ -153,15 +153,25 @@ struct StreamingHttpConnection
       id::UUID _streamId = id::UUID::random())
     : writer(_writer),
       contentType(_contentType),
-      encoder(lambda::bind(serialize, contentType, lambda::_1)),
       streamId(_streamId) {}
 
-  // Converts the message to the templated `Event`, via `evolve()`,
-  // before sending.
   template <typename Message>
   bool send(const Message& message)
   {
-    return writer.write(encoder.encode(evolve(message)));
+    // TODO(bmahler): Remove this evolve(). Could we still
+    // somehow assert that evolve(message) produces a result
+    // of type Event without calling evolve()?
+    Event e = evolve(message);
+
+    std::string record = serialize(contentType, e);
+
+    return writer.write(::recordio::encode(record));
+  }
+
+  // Like the above send, but for already serialized data.
+  bool send(const std::string& event)
+  {
+    return writer.write(::recordio::encode(event));
   }
 
   bool close()
@@ -176,9 +186,21 @@ struct StreamingHttpConnection
 
   process::http::Pipe::Writer writer;
   ContentType contentType;
-  ::recordio::Encoder<Event> encoder;
   id::UUID streamId;
 };
+
+
+// The representation of generic v0 protobuf => v1 protobuf as JSON,
+// e.g., `jsonify(asV1Protobuf(message))`.
+//
+// Specifically, this acts the same as JSON::Protobuf, except that
+// it remaps "slave" to "agent" in field names and enum values.
+struct asV1Protobuf : Representation<google::protobuf::Message>
+{
+  using Representation<google::protobuf::Message>::Representation;
+};
+
+void json(JSON::ObjectWriter* writer, const asV1Protobuf& protobuf);
 
 
 JSON::Object model(const Resources& resources);
