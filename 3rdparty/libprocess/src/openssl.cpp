@@ -16,7 +16,15 @@
 #include <sys/param.h>
 #endif // __WINDOWS__
 
+#ifdef USE_LIBEVENT
 #include <event2/event-config.h>
+#endif // USE_LIBEVENT
+
+#ifdef __WINDOWS__
+// NOTE: This must be included before the OpenSSL headers as it includes
+// `WinSock2.h` and `Windows.h` in the correct order.
+#include <stout/windows.hpp>
+#endif // __WINDOWS__
 
 #include <openssl/err.h>
 #include <openssl/rand.h>
@@ -542,8 +550,14 @@ void reinitialize()
   // Notify users of the 'SSL_SUPPORT_DOWNGRADE' flag that this
   // setting allows insecure connections.
   if (ssl_flags->support_downgrade) {
+#ifdef USE_LIBEVENT
     LOG(WARNING) <<
       "Failed SSL connections will be downgraded to a non-SSL socket";
+#else
+    EXIT(EXIT_FAILURE)
+      << "Non-libevent SSL sockets do not support downgrade yet,"
+      << " see MESOS-10073";
+#endif // USE_LIBEVENT
   }
 
   // TODO(bevers): Remove the deprecated names for these flags after an

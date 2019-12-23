@@ -807,6 +807,8 @@ if test "x$enable_libevent" = "xyes"; then
   else
     with_bundled_libevent=yes
   fi
+
+  AC_DEFINE([USE_LIBEVENT], [1])
 fi
 
 AM_CONDITIONAL([ENABLE_LIBEVENT],
@@ -1001,8 +1003,6 @@ libcrypto is required for an SSL-enabled build.
     if test "x$with_bundled_libevent" != "xyes"; then
       MESOS_HAVE_LIBEVENT_SSL()
     fi
-  else
-    AC_MSG_ERROR([SSL is currently only supported with libevent])
   fi
   AC_DEFINE([USE_SSL_SOCKET], [1])
 fi
