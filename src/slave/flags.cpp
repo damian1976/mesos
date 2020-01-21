@@ -25,6 +25,7 @@
 
 #include <mesos/type_utils.hpp>
 
+#include "common/domain_sockets.hpp"
 #include "common/http.hpp"
 #include "common/parse.hpp"
 #include "common/protobuf_utils.hpp"
@@ -989,6 +990,25 @@ mesos::internal::slave::Flags::Flags()
 #endif // __WINDOWS__
       );
 
+  add(&Flags::domain_socket_location,
+      "domain_socket_location",
+      "Location on the host filesystem of the domain socket used for\n"
+      "communication with executors.\n Alternatively, this can be set to"
+      "'systemd:<identifier>' to use the domain socket with the given\n"
+      "identifier, which is expected to be passed by systemd.\n"
+      "This flag will be ignored unless the '--http_executor_domain_sockets'\n"
+      "flag is also set to true. Total path length must be less than 108\n"
+      "characters.\n Will be set to <runtime_dir>/agent.sock by default.",
+      [](const Option<string>& location) -> Option<Error> {
+        if (location.isSome() &&
+            location->size() >= common::DOMAIN_SOCKET_MAX_PATH_LENGTH) {
+          return Error(
+              "Domain socket location cannot be longer than 108 characters.");
+        }
+
+        return None();
+      });
+
   add(&Flags::default_container_dns,
       "default_container_dns",
       "JSON-formatted DNS information for CNI networks (Mesos containerizer)\n"
@@ -1385,6 +1405,13 @@ mesos::internal::slave::Flags::Flags()
       "flag is only available when Mesos is built with SSL support.",
       false);
 #endif // USE_SSL_SOCKET
+
+  add(&Flags::http_executor_domain_sockets,
+      "http_executor_domain_sockets",
+      "If true, the agent will provide a unix domain sockets that the\n"
+      "executor can use to connect to the agent, instead of relying on\n"
+      "a TCP connection.",
+      false);
 
   add(&Flags::http_credentials,
       "http_credentials",

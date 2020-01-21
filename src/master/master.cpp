@@ -90,6 +90,7 @@
 #include "logging/flags.hpp"
 #include "logging/logging.hpp"
 
+#include "master/authorization.hpp"
 #include "master/flags.hpp"
 #include "master/master.hpp"
 #include "master/registry_operations.hpp"
@@ -145,6 +146,8 @@ using mesos::authorization::VIEW_ROLE;
 using mesos::authorization::VIEW_FRAMEWORK;
 using mesos::authorization::VIEW_TASK;
 using mesos::authorization::VIEW_EXECUTOR;
+
+using mesos::authorization::ActionObject;
 
 using mesos::master::contender::MasterContender;
 
@@ -2234,37 +2237,11 @@ void Master::detected(const Future<Option<MasterInfo>>& _leader)
 Future<bool> Master::authorizeFramework(
     const FrameworkInfo& frameworkInfo)
 {
-  if (authorizer.isNone()) {
-    return true; // Authorization is disabled.
-  }
-
-  LOG(INFO) << "Authorizing framework principal '" << frameworkInfo.principal()
-            << "' to receive offers for roles '"
-            << stringify(protobuf::framework::getRoles(frameworkInfo)) << "'";
-
-  authorization::Request request;
-  request.set_action(authorization::REGISTER_FRAMEWORK);
-
-  if (frameworkInfo.has_principal()) {
-    request.mutable_subject()->set_value(frameworkInfo.principal());
-  }
-
-  request.mutable_object()->mutable_framework_info()->CopyFrom(frameworkInfo);
-
-  // For non-`MULTI_ROLE` frameworks, also propagate its single role
-  // via the request's `value` field. This is purely for backwards
-  // compatibility as the `value` field is deprecated. Note that this
-  // means that authorizers relying on the deprecated field will see
-  // an empty string in `value` for `MULTI_ROLE` frameworks.
-  //
-  // TODO(bbannier): Remove this at the end of `value`'s deprecation
-  // cycle, see MESOS-7073.
-  if (!protobuf::frameworkHasCapability(
-          frameworkInfo, FrameworkInfo::Capability::MULTI_ROLE)) {
-    request.mutable_object()->set_value(frameworkInfo.role());
-  }
-
-  return authorizer.get()->authorized(request);
+  return authorize(
+      frameworkInfo.has_principal()
+        ? Option<Principal>(frameworkInfo.principal())
+        : Option<Principal>::none(),
+       ActionObject::frameworkRegistration(frameworkInfo));
 }
 
 
@@ -3716,551 +3693,60 @@ void Master::launchTasks(
 }
 
 
-Future<bool> Master::authorizeTask(
-    const TaskInfo& task,
-    Framework* framework)
-{
-  CHECK_NOTNULL(framework);
-
-  if (authorizer.isNone()) {
-    return true; // Authorization is disabled.
-  }
-
-  // Authorize the task.
-  authorization::Request request;
-
-  if (framework->info.has_principal()) {
-    request.mutable_subject()->set_value(framework->info.principal());
-  }
-
-  request.set_action(authorization::RUN_TASK);
-
-  authorization::Object* object = request.mutable_object();
-
-  object->mutable_task_info()->CopyFrom(task);
-  object->mutable_framework_info()->CopyFrom(framework->info);
-
-  LOG(INFO)
-    << "Authorizing framework principal '"
-    << (framework->info.has_principal() ? framework->info.principal() : "ANY")
-    << "' to launch task " << task.task_id();
-
-  return authorizer.get()->authorized(request);
-}
-
-
-Future<bool> Master::authorizeReserveResources(
-    const Offer::Operation::Reserve& reserve,
-    const Option<Principal>& principal)
-{
-  if (authorizer.isNone()) {
-    return true; // Authorization is disabled.
-  }
-
-  authorization::Request request;
-  request.set_action(authorization::RESERVE_RESOURCES);
-
-  Option<authorization::Subject> subject = createSubject(principal);
-  if (subject.isSome()) {
-    request.mutable_subject()->CopyFrom(subject.get());
-  }
-
-  vector<Future<bool>> authorizations;
-
-  // We support `Reserve` operations with either `source` set or unset. If
-  // `source` is unset (an older API), it is possible to send calls which
-  // contain also resources whose reservations are unmodified; in that case all
-  // `Reserve` `resources` will be authorized. In the case where `source` is set
-  // we follow a narrower contract and e.g., only accept resources whose
-  // reservations are all modified, and require identical modifications for all
-  // passed `Resource`s.
-  //
-  // This e.g., means that we cannot upgrade calls without `source` to
-  // calls with `source` and use uniform handling. Instead we branch
-  // on whether `source` was set to select the authorization handling.
-  // Each fundamental reservation added in with with-`source` case can
-  // then be authorized using the historic, wider contract.
-  if (reserve.source().empty()) {
-    // The operation will be authorized if the entity is allowed to make
-    // reservations for all roles included in `reserve.resources`.
-    // Add an element to `request.roles` for each unique role in the resources.
-    hashset<string> roles;
-
-    foreach (const Resource& resource, reserve.resources()) {
-      // NOTE: We rely on the master to ensure that the resource is in the
-      // post-reservation-refinement format. If there is a stack of
-      // reservations, we perform authorization for the role of the most refined
-      // reservation, since we only support "pushing" one reservation at a time.
-      // That is, all of the previous reservations must have already been
-      // authorized.
-      //
-      // NOTE: If there is no reservation, we authorize the resource with the
-      // default role '*' for backward compatibility.
-      CHECK(!resource.has_role()) << resource;
-      CHECK(!resource.has_reservation()) << resource;
-
-      const string role = Resources::isReserved(resource)
-        ? Resources::reservationRole(resource) : "*";
-
-      if (!roles.contains(role)) {
-        roles.insert(role);
-
-        request.mutable_object()->mutable_resource()->CopyFrom(resource);
-
-        // We also set the deprecated `object.value` field to support legacy
-        // authorizers that have not been upgraded to look at `object.resource`.
-        request.mutable_object()->set_value(role);
-
-        authorizations.push_back(authorizer.get()->authorized(request));
-      }
-    }
-
-    LOG(INFO) << "Authorizing principal '"
-              << (principal.isSome() ? stringify(principal.get()) : "ANY")
-              << "' to reserve resources '" << reserve.resources() << "'";
-  } else {
-    Resources source = reserve.source();
-    const Resources target = reserve.resources();
-    const Resources ancestor =
-      Resources::getReservationAncestor(source, target);
-
-    // Authorize `UNRESERVE` operations bringing `source` to `ancestor`.
-    while (source != ancestor) {
-      Offer::Operation::Unreserve unreserve;
-      unreserve.mutable_resources()->CopyFrom(source);
-
-      authorizations.push_back(
-          authorizeUnreserveResources(unreserve, principal));
-
-      source = source.popReservation();
-    }
-
-    // Authorize `RESERVE` operations bringing `ancestor` to `target`.
-    const RepeatedPtrField<Resource::ReservationInfo>& targetReservations =
-      reserve.resources(0).reservations();
-    const RepeatedPtrField<Resource::ReservationInfo>& ancestorReservations =
-      RepeatedPtrField<Resource>(ancestor).begin()->reservations();
-
-    // Skip reservations common among `source` and `resources`.
-    auto it = targetReservations.begin();
-    std::advance(it, ancestorReservations.size());
-
-    for (; it != targetReservations.end(); ++it) {
-      source = source.pushReservation(*it);
-
-      // We do not set `source` here to trigger the previous branch.
-      Offer::Operation::Reserve reserve;
-      reserve.mutable_resources()->CopyFrom(source);
-
-      authorizations.push_back(authorizeReserveResources(reserve, principal));
-    }
-  }
-
-  // NOTE: Empty authorizations are not valid and are checked by a validator.
-  // However under certain circumstances, this method can be called before
-  // the validation occur and the case must be considered non erroneous.
-  // TODO(arojas): Consider ensuring that `validate()` is called before
-  // `authorizeReserveResources` so a `CHECK(!roles.empty())` can be added.
-  if (authorizations.empty()) {
-    return authorizer.get()->authorized(request);
-  }
-
-  return authorization::collectAuthorizations(authorizations);
-}
-
-
-Future<bool> Master::authorizeUnreserveResources(
-    const Offer::Operation::Unreserve& unreserve,
-    const Option<Principal>& principal)
-{
-  if (authorizer.isNone()) {
-    return true; // Authorization is disabled.
-  }
-
-  authorization::Request request;
-  request.set_action(authorization::UNRESERVE_RESOURCES);
-
-  Option<authorization::Subject> subject = createSubject(principal);
-  if (subject.isSome()) {
-    request.mutable_subject()->CopyFrom(subject.get());
-  }
-
-  vector<Future<bool>> authorizations;
-  foreach (const Resource& resource, unreserve.resources()) {
-    // NOTE: We rely on the master to ensure that the resource is in the
-    // post-reservation-refinement format. Since the UNRESERVE operation only
-    // "pops" one reservation off the stack of reservations, we perform
-    // authorization for the principal of the most refined reservation, which
-    // will be unreserved (i.e., popped off the stack).
-    //
-    // NOTE: Since authorization happens __before__ validation, we must check
-    // here that this resource has a reservation. If not, the error will be
-    // caught during validation.
-    CHECK(!resource.has_role()) << resource;
-    CHECK(!resource.has_reservation()) << resource;
-
-    Option<string> principal;
-    if (!resource.reservations().empty() &&
-        resource.reservations().rbegin()->has_principal()) {
-      principal = resource.reservations().rbegin()->principal();
-    }
-
-    if (principal.isSome()) {
-      request.mutable_object()->mutable_resource()->CopyFrom(resource);
-
-      // We also set the deprecated `object.value` field to support legacy
-      // authorizers that have not been upgraded to look at `object.resource`.
-      request.mutable_object()->set_value(principal.get());
-
-      authorizations.push_back(authorizer.get()->authorized(request));
-    }
-  }
-
-  LOG(INFO) << "Authorizing principal '"
-            << (principal.isSome() ? stringify(principal.get()) : "ANY")
-            << "' to unreserve resources '" << unreserve.resources() << "'";
-
-  if (authorizations.empty()) {
-    return authorizer.get()->authorized(request);
-  }
-
-  return authorization::collectAuthorizations(authorizations);
-}
-
-
-Future<bool> Master::authorizeCreateVolume(
-    const Offer::Operation::Create& create,
-    const Option<Principal>& principal)
-{
-  if (authorizer.isNone()) {
-    return true; // Authorization is disabled.
-  }
-
-  authorization::Request request;
-  request.set_action(authorization::CREATE_VOLUME);
-
-  Option<authorization::Subject> subject = createSubject(principal);
-  if (subject.isSome()) {
-    request.mutable_subject()->CopyFrom(subject.get());
-  }
-
-  // The operation will be authorized if the entity is allowed to create
-  // volumes for all roles included in `create.volumes`.
-  // Add an element to `request.roles` for each unique role in the volumes.
-  hashset<string> roles;
-  vector<Future<bool>> authorizations;
-  foreach (const Resource& volume, create.volumes()) {
-    // NOTE: We rely on the master to ensure that the resource is in the
-    // post-reservation-refinement format. If there is a stack of reservations,
-    // we perform authorization for the role of the most refined reservation,
-    // since we only support "pushing" one reservation at a time. That is, all
-    // of the previous reservations must have already been authorized.
-    //
-    // NOTE: Since authorization happens __before__ validation, we must check
-    // here that this resource has a reservation. If not, the error will be
-    // caught during validation, but we still authorize the resource with the
-    // default role '*' for backward compatibility.
-    CHECK(!volume.has_role()) << volume;
-    CHECK(!volume.has_reservation()) << volume;
-
-    const string role =
-      Resources::isReserved(volume) ? Resources::reservationRole(volume) : "*";
-
-    if (!roles.contains(role)) {
-      roles.insert(role);
-
-      request.mutable_object()->mutable_resource()->CopyFrom(volume);
-
-      // We also set the deprecated `object.value` field to support legacy
-      // authorizers that have not been upgraded to look at `object.resource`.
-      request.mutable_object()->set_value(role);
-
-      authorizations.push_back(authorizer.get()->authorized(request));
-    }
-  }
-
-  LOG(INFO) << "Authorizing principal '"
-            << (principal.isSome() ? stringify(principal.get()) : "ANY")
-            << "' to create volumes '" << create.volumes() << "'";
-
-  if (authorizations.empty()) {
-    return authorizer.get()->authorized(request);
-  }
-
-  return authorization::collectAuthorizations(authorizations);
-}
-
-
-Future<bool> Master::authorizeDestroyVolume(
-    const Offer::Operation::Destroy& destroy,
-    const Option<Principal>& principal)
-{
-  if (authorizer.isNone()) {
-    return true; // Authorization is disabled.
-  }
-
-  authorization::Request request;
-  request.set_action(authorization::DESTROY_VOLUME);
-
-  Option<authorization::Subject> subject = createSubject(principal);
-  if (subject.isSome()) {
-    request.mutable_subject()->CopyFrom(subject.get());
-  }
-
-  vector<Future<bool>> authorizations;
-  foreach (const Resource& volume, destroy.volumes()) {
-    // NOTE: Since authorization happens __before__ validation, we must check
-    // here that this resource is a persistent volume. If not, the error will be
-    // caught during validation.
-    if (volume.has_disk() && volume.disk().has_persistence()) {
-      request.mutable_object()->mutable_resource()->CopyFrom(volume);
-
-      // We also set the deprecated `object.value` field to support legacy
-      // authorizers that have not been upgraded to look at `object.resource`.
-      request.mutable_object()->set_value(
-          volume.disk().persistence().principal());
-
-      authorizations.push_back(authorizer.get()->authorized(request));
-    }
-  }
-
-  LOG(INFO) << "Authorizing principal '"
-            << (principal.isSome() ? stringify(principal.get()) : "ANY")
-            << "' to destroy volumes '" << destroy.volumes() << "'";
-
-  if (authorizations.empty()) {
-    return authorizer.get()->authorized(request);
-  }
-
-  return authorization::collectAuthorizations(authorizations);
-}
-
-
-Future<bool> Master::authorizeResizeVolume(
-    const Resource& volume,
-    const Option<Principal>& principal)
-{
-  if (authorizer.isNone()) {
-    return true; // Authorization is disabled.
-  }
-
-  authorization::Request request;
-  request.set_action(authorization::RESIZE_VOLUME);
-
-  Option<authorization::Subject> subject = createSubject(principal);
-  if (subject.isSome()) {
-    request.mutable_subject()->CopyFrom(subject.get());
-  }
-
-  request.mutable_object()->mutable_resource()->CopyFrom(volume);
-
-  // We also set the deprecated `object.value` field to support legacy
-  // authorizers that have not been upgraded to look at `object.resource`.
-  //
-  // NOTE: We rely on the master to ensure that the resource is in the
-  // post-reservation-refinement format. If there is a stack of reservations,
-  // we perform authorization for the role of the most refined reservation,
-  // since we only support "pushing" one reservation at a time. That is, all
-  // of the previous reservations must have already been authorized.
-  //
-  // NOTE: Since authorization happens __before__ validation, we must check here
-  // that this resource has a reservation. If not, the error will be caught
-  // during validation, but we still authorize the resource with the default
-  // role '*' for backward compatibility.
-  CHECK(!volume.has_role()) << volume;
-  CHECK(!volume.has_reservation()) << volume;
-
-  request.mutable_object()->set_value(
-      Resources::isReserved(volume) ? Resources::reservationRole(volume) : "*");
-
-  LOG(INFO) << "Authorizing principal '"
-            << (principal.isSome() ? stringify(principal.get()) : "ANY")
-            << "' to resize volume '" << volume << "'";
-
-  return authorizer.get()->authorized(request);
-}
-
-
-Future<bool> Master::authorizeCreateDisk(
-    const Offer::Operation::CreateDisk& createDisk,
-    const Option<Principal>& principal)
-{
-  if (authorizer.isNone()) {
-    return true; // Authorization is disabled.
-  }
-
-  const Resource& resource = createDisk.source();
-
-  Option<authorization::Action> action;
-  switch (createDisk.target_type()) {
-    case Resource::DiskInfo::Source::MOUNT: {
-      action = authorization::CREATE_MOUNT_DISK;
-      break;
-    }
-    case Resource::DiskInfo::Source::BLOCK: {
-      action = authorization::CREATE_BLOCK_DISK;
-      break;
-    }
-    case Resource::DiskInfo::Source::UNKNOWN:
-    case Resource::DiskInfo::Source::PATH:
-    case Resource::DiskInfo::Source::RAW: {
-      return Failure(
-          "Failed to authorize principal '" +
-          (principal.isSome() ? stringify(principal.get()) : "ANY") +
-          "' to create a " + stringify(createDisk.target_type()) +
-          " disk from '" + stringify(resource) + "': Unsupported disk type");
-    }
-  }
-
-  authorization::Request request;
-  request.set_action(CHECK_NOTNONE(action));
-
-  Option<authorization::Subject> subject = createSubject(principal);
-  if (subject.isSome()) {
-    request.mutable_subject()->CopyFrom(subject.get());
-  }
-
-  request.mutable_object()->mutable_resource()->CopyFrom(resource);
-
-  // We also set the deprecated `object.value` field to support legacy
-  // authorizers that have not been upgraded to look at `object.resource`.
-  //
-  // NOTE: We rely on the master to ensure that the resource is in the
-  // post-reservation-refinement format. If there is a stack of reservations,
-  // we perform authorization for the role of the most refined reservation,
-  // since we only support "pushing" one reservation at a time. That is, all
-  // of the previous reservations must have already been authorized.
-  //
-  // NOTE: If there is no reservation, we authorize the resource with the
-  // default role '*' for backward compatibility.
-  CHECK(!resource.has_role()) << resource;
-  CHECK(!resource.has_reservation()) << resource;
-
-  request.mutable_object()->set_value(
-      Resources::isReserved(resource) ? Resources::reservationRole(resource)
-                                      : "*");
-
-  LOG(INFO) << "Authorizing principal '"
-            << (principal.isSome() ? stringify(principal.get()) : "ANY")
-            << "' to create a " << createDisk.target_type() << " disk from '"
-            << createDisk.source() << "'";
-
-  return authorizer.get()->authorized(request);
-}
-
-
-Future<bool> Master::authorizeDestroyDisk(
-    const Offer::Operation::DestroyDisk& destroyDisk,
-    const Option<Principal>& principal)
-{
-  if (authorizer.isNone()) {
-    return true; // Authorization is disabled.
-  }
-
-  const Resource& resource = destroyDisk.source();
-
-  Option<authorization::Action> action;
-  switch (resource.disk().source().type()) {
-    case Resource::DiskInfo::Source::MOUNT: {
-      action = authorization::DESTROY_MOUNT_DISK;
-      break;
-    }
-    case Resource::DiskInfo::Source::BLOCK: {
-      action = authorization::DESTROY_BLOCK_DISK;
-      break;
-    }
-    case Resource::DiskInfo::Source::RAW: {
-      action = authorization::DESTROY_RAW_DISK;
-      break;
-    }
-    case Resource::DiskInfo::Source::UNKNOWN:
-    case Resource::DiskInfo::Source::PATH: {
-      return Failure(
-          "Failed to authorize principal '" +
-          (principal.isSome() ? stringify(principal.get()) : "ANY") +
-          "' to destroy disk '" + stringify(resource) +
-          "': Unsupported disk type");
-    }
-  }
-
-  authorization::Request request;
-  request.set_action(CHECK_NOTNONE(action));
-
-  Option<authorization::Subject> subject = createSubject(principal);
-  if (subject.isSome()) {
-    request.mutable_subject()->CopyFrom(subject.get());
-  }
-
-  request.mutable_object()->mutable_resource()->CopyFrom(resource);
-
-  // We also set the deprecated `object.value` field to support legacy
-  // authorizers that have not been upgraded to look at `object.resource`.
-  //
-  // NOTE: We rely on the master to ensure that the resource is in the
-  // post-reservation-refinement format. If there is a stack of reservations,
-  // we perform authorization for the role of the most refined reservation,
-  // since we only support "pushing" one reservation at a time. That is, all
-  // of the previous reservations must have already been authorized.
-  //
-  // NOTE: If there is no reservation, we authorize the resource with the
-  // default role '*' for backward compatibility.
-  CHECK(!resource.has_role()) << resource;
-  CHECK(!resource.has_reservation()) << resource;
-
-  request.mutable_object()->set_value(
-      Resources::isReserved(resource) ? Resources::reservationRole(resource)
-                                      : "*");
-
-  LOG(INFO) << "Authorizing principal '"
-            << (principal.isSome() ? stringify(principal.get()) : "ANY")
-            << "' to destroy disk '" << destroyDisk.source() << "'";
-
-  return authorizer.get()->authorized(request);
-}
-
-
-Future<bool> Master::authorizeSlave(
-    const SlaveInfo& slaveInfo,
-    const Option<Principal>& principal)
+Future<bool> Master::authorize(
+    const Option<Principal>& principal,
+    ActionObject&& actionObject)
 {
   if (authorizer.isNone()) {
     return true;
   }
 
-  vector<Future<bool>> authorizations;
-
-  // First authorize whether the agent can register.
-  LOG(INFO) << "Authorizing agent providing resources "
-            << "'" << stringify(Resources(slaveInfo.resources())) << "' "
-            << (principal.isSome()
-                ? "with principal '" + stringify(principal.get()) + "'"
-                : "without a principal");
+  const Option<authorization::Subject> subject = createSubject(principal);
 
   authorization::Request request;
-  request.set_action(authorization::REGISTER_AGENT);
 
-  Option<authorization::Subject> subject = createSubject(principal);
   if (subject.isSome()) {
-    request.mutable_subject()->CopyFrom(subject.get());
+    *request.mutable_subject() = *subject;
   }
 
-  // No need to set the request's object as it is implicitly set to
-  // ANY by the authorizer.
-  authorizations.push_back(authorizer.get()->authorized(request));
+  LOG(INFO) << "Authorizing"
+            << (principal.isSome()
+                  ? " principal '" + stringify(*principal) + "'"
+                  : " ANY principal")
+            << " to " << actionObject;
 
-  // Next, if static reservations exist, also authorize them.
+  request.set_action(actionObject.action());
+  if (actionObject.object().isSome()) {
+    *request.mutable_object() = *(std::move(actionObject).object());
+  }
+
+  // TODO(asekretenko): Use a background-refreshed ObjectApprover
+  // when they become available (see MESOS-10056).
+  return authorizer.get()->authorized(request);
+}
+
+
+Future<bool> Master::authorize(
+    const Option<Principal>& principal,
+    vector<ActionObject>&& actionObjects)
+{
+  // NOTE: In some cases (example: RESERVE with empty resources or with source
+  // identical to target) there is no need to authorize any action-object pair
+  // (and no meaningful ActionObject can be composed anyway). Here, we treat
+  // authorization as PASSED in these cases and expect these cases to be
+  // handled by validation afterwards.
   //
-  // NOTE: We don't look at dynamic reservations in checkpointed
-  // resources because they should have gone through authorization
-  // against the framework / operator's principal when they were
-  // created. In constrast, static reservations are initiated by the
-  // agent's principal and authorizing them helps prevent agents from
-  // advertising reserved resources of arbitrary roles.
-  if (!Resources(slaveInfo.resources()).reserved().empty()) {
-    Offer::Operation::Reserve reserve;
-    reserve.mutable_resources()->CopyFrom(slaveInfo.resources());
-    authorizations.push_back(
-        authorizeReserveResources(reserve, principal));
+  // Some of these cases are invalid; ideally, they should be filtered by
+  // validation before being fed into ActionObject-composing code (see
+  // MESOS-10083).
+  if (actionObjects.empty()) {
+    return true;
+  }
+
+  vector<Future<bool>> authorizations;
+  authorizations.reserve(actionObjects.size());
+  for (ActionObject& actionObject : actionObjects) {
+    authorizations.push_back(authorize(principal, std::move(actionObject)));
   }
 
   return authorization::collectAuthorizations(authorizations);
@@ -4341,6 +3827,7 @@ void Master::addTask(
   slave->addTask(t);
   framework->addTask(t);
 }
+
 
 
 void Master::accept(
@@ -4789,43 +4276,60 @@ void Master::accept(
   LOG(INFO) << "Processing ACCEPT call for offers: " << accept.offer_ids()
             << " on agent " << *slave << " for framework " << *framework;
 
+  auto getOperationTasks =
+    [](const Offer::Operation& operation) -> const RepeatedPtrField<TaskInfo>& {
+    if (operation.type() == Offer::Operation::LAUNCH) {
+      return operation.launch().task_infos();
+    }
+
+    if (operation.type() == Offer::Operation::LAUNCH_GROUP) {
+      return operation.launch_group().task_group().tasks();
+    }
+
+    UNREACHABLE();
+  };
+
+  // Add tasks to be launched to the framework's list of pending tasks
+  // before authorizing.
+  //
+  // NOTE: If two tasks have the same ID, the second one will
+  // not be put into 'framework->pendingTasks', therefore
+  // will not be launched (and TASK_ERROR will be sent).
+  // Unfortunately, we can't tell the difference between a
+  // duplicate TaskID and getting killed while pending
+  // (removed from the map). So it's possible that we send
+  // a TASK_ERROR after a TASK_KILLED (see _accept())!
+  for (const Offer::Operation& operation : accept.operations()) {
+    if (operation.type() == Offer::Operation::LAUNCH ||
+        operation.type() == Offer::Operation::LAUNCH_GROUP) {
+      for (const TaskInfo& task : getOperationTasks(operation)) {
+        if (!framework->pendingTasks.contains(task.task_id())) {
+          framework->pendingTasks[task.task_id()] = task;
+        }
+
+        // Add to the slave's list of pending tasks.
+        if (!slave->pendingTasks.contains(framework->id()) ||
+            !slave->pendingTasks[framework->id()].contains(task.task_id())) {
+          slave->pendingTasks[framework->id()][task.task_id()] = task;
+        }
+      }
+    }
+  }
+
+  const Option<Principal> principal = framework->info.has_principal()
+    ? Principal(framework->info.principal())
+    : Option<Principal>::none();
+
+  // TODO(asekretenko): Use background-refreshed ObjectApprovers
+  // instead of asynchronous authorization.
   vector<Future<bool>> futures;
-  foreach (const Offer::Operation& operation, accept.operations()) {
+  for (const Offer::Operation& operation : accept.operations()) {
     switch (operation.type()) {
       case Offer::Operation::LAUNCH:
       case Offer::Operation::LAUNCH_GROUP: {
-        const RepeatedPtrField<TaskInfo>& tasks = [&]() {
-          if (operation.type() == Offer::Operation::LAUNCH) {
-            return operation.launch().task_infos();
-          } else if (operation.type() == Offer::Operation::LAUNCH_GROUP) {
-            return operation.launch_group().task_group().tasks();
-          }
-          UNREACHABLE();
-        }();
-
-        // Authorize the tasks. A task is in 'framework->pendingTasks'
-        // and 'slave->pendingTasks' before it is authorized.
-        foreach (const TaskInfo& task, tasks) {
-          futures.push_back(authorizeTask(task, framework));
-
-          // Add to the framework's list of pending tasks.
-          //
-          // NOTE: If two tasks have the same ID, the second one will
-          // not be put into 'framework->pendingTasks', therefore
-          // will not be launched (and TASK_ERROR will be sent).
-          // Unfortunately, we can't tell the difference between a
-          // duplicate TaskID and getting killed while pending
-          // (removed from the map). So it's possible that we send
-          // a TASK_ERROR after a TASK_KILLED (see _accept())!
-          if (!framework->pendingTasks.contains(task.task_id())) {
-            framework->pendingTasks[task.task_id()] = task;
-          }
-
-          // Add to the slave's list of pending tasks.
-          if (!slave->pendingTasks.contains(framework->id()) ||
-              !slave->pendingTasks[framework->id()].contains(task.task_id())) {
-            slave->pendingTasks[framework->id()][task.task_id()] = task;
-          }
+        for (const TaskInfo& task : getOperationTasks(operation)) {
+          futures.emplace_back(authorize(
+              principal, ActionObject::taskLaunch(task, framework->info)));
         }
         break;
       }
@@ -4838,100 +4342,72 @@ void Master::accept(
 
       // The RESERVE operation allows a principal to reserve resources.
       case Offer::Operation::RESERVE: {
-        Option<Principal> principal = framework->info.has_principal()
-          ? Principal(framework->info.principal())
-          : Option<Principal>::none();
-
-        futures.push_back(
-            authorizeReserveResources(
-                operation.reserve(), principal));
+        futures.push_back(authorize(
+            principal, ActionObject::reserve(operation.reserve())));
 
         break;
       }
 
       // The UNRESERVE operation allows a principal to unreserve resources.
       case Offer::Operation::UNRESERVE: {
-        Option<Principal> principal = framework->info.has_principal()
-          ? Principal(framework->info.principal())
-          : Option<Principal>::none();
-
-        futures.push_back(
-            authorizeUnreserveResources(
-                operation.unreserve(), principal));
+        futures.push_back(authorize(
+            principal, ActionObject::unreserve(operation.unreserve())));
 
         break;
       }
 
       // The CREATE operation allows the creation of a persistent volume.
       case Offer::Operation::CREATE: {
-        Option<Principal> principal = framework->info.has_principal()
-          ? Principal(framework->info.principal())
-          : Option<Principal>::none();
-
-        futures.push_back(
-            authorizeCreateVolume(
-                operation.create(), principal));
+        futures.push_back(authorize(
+            principal, ActionObject::createVolume(operation.create())));
 
         break;
       }
 
       // The DESTROY operation allows the destruction of a persistent volume.
       case Offer::Operation::DESTROY: {
-        Option<Principal> principal = framework->info.has_principal()
-          ? Principal(framework->info.principal())
-          : Option<Principal>::none();
-
-        futures.push_back(
-            authorizeDestroyVolume(
-                operation.destroy(), principal));
+        futures.push_back(authorize(
+            principal, ActionObject::destroyVolume(operation.destroy())));
 
         break;
       }
 
       case Offer::Operation::GROW_VOLUME: {
-        Option<Principal> principal = framework->info.has_principal()
-          ? Principal(framework->info.principal())
-          : Option<Principal>::none();
-
-        futures.push_back(
-            authorizeResizeVolume(
-                operation.grow_volume().volume(), principal));
+        futures.push_back(authorize(
+            principal, ActionObject::growVolume(operation.grow_volume())));
 
         break;
       }
 
       case Offer::Operation::SHRINK_VOLUME: {
-        Option<Principal> principal = framework->info.has_principal()
-          ? Principal(framework->info.principal())
-          : Option<Principal>::none();
-
-        futures.push_back(
-            authorizeResizeVolume(
-                operation.shrink_volume().volume(), principal));
+        futures.push_back(authorize(
+            principal, ActionObject::shrinkVolume(operation.shrink_volume())));
 
         break;
       }
 
       case Offer::Operation::CREATE_DISK: {
-        Option<Principal> principal = framework->info.has_principal()
-          ? Principal(framework->info.principal())
-          : Option<Principal>::none();
+        Try<ActionObject> actionObject =
+          ActionObject::createDisk(operation.create_disk());
 
-        futures.push_back(
-            authorizeCreateDisk(
-                operation.create_disk(), principal));
+        if (actionObject.isError()) {
+          futures.push_back(Failure(actionObject.error()));
+        } else {
+          futures.push_back(authorize(principal, std::move(*actionObject)));
+        }
 
         break;
       }
 
       case Offer::Operation::DESTROY_DISK: {
-        Option<Principal> principal = framework->info.has_principal()
-          ? Principal(framework->info.principal())
-          : Option<Principal>::none();
+        Try<ActionObject> actionObject =
+          ActionObject::destroyDisk(operation.destroy_disk());
 
-        futures.push_back(
-            authorizeDestroyDisk(
-                operation.destroy_disk(), principal));
+        if (actionObject.isError()) {
+          futures.push_back(Failure(actionObject.error()));
+        } else {
+          futures.push_back(authorize(principal, std::move(*actionObject)));
+        }
 
         break;
       }
@@ -7171,8 +6647,8 @@ void Master::registerSlave(
   // Calling the `onAny` continuation below separately so we can move
   // `registerSlaveMessage` without it being evaluated before it's used
   // by `authorizeSlave`.
-  Future<bool> authorization =
-    authorizeSlave(registerSlaveMessage.slave(), principal);
+  Future<bool> authorization = authorize(
+      principal, ActionObject::agentRegistration(registerSlaveMessage.slave()));
 
   authorization
     .onAny(defer(self(),
@@ -7525,8 +7001,9 @@ void Master::reregisterSlave(
   // Calling the `onAny` continuation below separately so we can move
   // `reregisterSlaveMessage` without it being evaluated before it's used
   // by `authorizeSlave`.
-  Future<bool> authorization =
-    authorizeSlave(reregisterSlaveMessage.slave(), principal);
+  Future<bool> authorization = authorize(
+      principal,
+      ActionObject::agentRegistration(reregisterSlaveMessage.slave()));
 
   authorization
     .onAny(defer(self(),

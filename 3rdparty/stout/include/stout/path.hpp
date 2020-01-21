@@ -17,6 +17,9 @@
 #include <utility>
 #include <vector>
 
+#include <glog/logging.h>
+
+#include <stout/attributes.hpp>
 #include <stout/stringify.hpp>
 #include <stout/strings.hpp>
 
@@ -132,7 +135,9 @@ inline std::string join(
 }
 
 
-inline std::string join(const std::vector<std::string>& paths)
+inline std::string join(
+    const std::vector<std::string>& paths,
+    const char separator = os::PATH_SEPARATOR)
 {
   if (paths.empty()) {
     return "";
@@ -140,7 +145,7 @@ inline std::string join(const std::vector<std::string>& paths)
 
   std::string result = paths[0];
   for (size_t i = 1; i < paths.size(); ++i) {
-    result = join(result, paths[i]);
+    result = join(result, paths[i], separator);
   }
   return result;
 }
@@ -150,7 +155,7 @@ inline std::string join(const std::vector<std::string>& paths)
  * Returns whether the given path is an absolute path.
  * If an invalid path is given, the return result is also invalid.
  */
-inline bool absolute(const std::string& path)
+inline bool is_absolute(const std::string& path)
 {
 #ifndef __WINDOWS__
   return strings::startsWith(path, os::PATH_SEPARATOR);
@@ -188,6 +193,11 @@ inline bool absolute(const std::string& path)
   std::string colon = path.substr(1, 2);
   return colon == ":\\" || colon == ":/";
 #endif // __WINDOWS__
+}
+
+STOUT_DEPRECATED inline bool absolute(const std::string& path)
+{
+  return is_absolute(path);
 }
 
 } // namespace path {
@@ -363,9 +373,9 @@ public:
   }
 
   // Checks whether the path is absolute.
-  inline bool absolute() const
+  inline bool is_absolute() const
   {
-    return path::absolute(value);
+    return path::is_absolute(value);
   }
 
   // Implicit conversion from Path to string.
@@ -378,6 +388,89 @@ public:
   {
     return value;
   }
+
+  // An iterator over path components. Paths are expected to be normalized.
+  //
+  // The effect of using this iterator is to split the path at its
+  // separator and iterate over the different splits. This means in
+  // particular that this class performs no path normalization.
+  class const_iterator
+  {
+  public:
+    using iterator_category = std::forward_iterator_tag;
+    using value_type = std::string;
+    using difference_type = std::string::const_iterator::difference_type;
+    using pointer = std::string::const_iterator::pointer;
+
+    // We cannot return a reference type (or `const char*` for that
+    // matter) as we neither own string values nor deal with setting up
+    // proper null-terminated output buffers.
+    //
+    // TODO(bbannier): Consider introducing a `string_view`-like class
+    // to wrap path components and use it as a reference type here and as
+    // `value_type`, and as return value for most `Path` member functions above.
+    using reference = std::string;
+
+    explicit const_iterator(
+        const Path* path_,
+        std::string::const_iterator offset_)
+      : path(path_), offset(offset_) {}
+
+    // Disallow construction from temporary as we hold a reference to `path`.
+    explicit const_iterator(Path&& path) = delete;
+
+    const_iterator& operator++()
+    {
+      offset = std::find(offset, path->string().end(), path->separator);
+
+      // If after incrementing we have reached the end return immediately.
+      if (offset == path->string().end()) {
+        return *this;
+      } else {
+        // If we are not at the end we have a separator to skip.
+        ++offset;
+      }
+
+      return *this;
+    }
+
+    const_iterator operator++(int)
+    {
+      const_iterator it = *this;
+      ++(*this);
+      return it;
+    }
+
+    bool operator==(const const_iterator& other) const
+    {
+      CHECK_EQ(path, other.path)
+        << "Iterators into different paths cannot be compared";
+
+      return (!path && !other.path) || offset == other.offset;
+    }
+
+    bool operator!=(const const_iterator& other) const
+    {
+      return !(*this == other);
+    }
+
+    reference operator*() const
+    {
+      auto end = std::find(offset, path->string().end(), path->separator);
+      return reference(offset, end);
+    }
+
+  private:
+    const Path* path = nullptr;
+    std::string::const_iterator offset;
+  };
+
+  const_iterator begin() const
+  {
+    return const_iterator(this, string().begin());
+  }
+
+  const_iterator end() const { return const_iterator(this, string().end()); }
 
 private:
   std::string value;
@@ -427,5 +520,73 @@ inline std::ostream& operator<<(
 {
   return stream << path.string();
 }
+
+
+namespace path {
+
+// Compute path of `path` relative to `base`.
+inline Try<std::string> relative(
+    const std::string& path_,
+    const std::string& base_,
+    char path_separator = os::PATH_SEPARATOR)
+{
+  if (path::is_absolute(path_) != path::is_absolute(base_)) {
+    return Error(
+        "Relative paths can only be computed between paths which are either "
+        "both absolute or both relative");
+  }
+
+  // Normalize both `path` and `base`.
+  Try<std::string> normalized_path = path::normalize(path_);
+  Try<std::string> normalized_base = path::normalize(base_);
+
+  if (normalized_path.isError()) {
+    return normalized_path;
+  }
+
+  if (normalized_base.isError()) {
+    return normalized_base;
+  }
+
+  // If normalized `path` and `base` are identical return `.`.
+  if (*normalized_path == *normalized_base) {
+    return ".";
+  }
+
+  const Path path(*normalized_path);
+  const Path base(*normalized_base);
+
+  auto path_it = path.begin();
+  auto base_it = base.begin();
+
+  const auto path_end = path.end();
+  const auto base_end = base.end();
+
+  // Strip common path components.
+  for (; path_it != path_end && base_it != base_end && *path_it == *base_it;
+       ++path_it, ++base_it) {
+  }
+
+  std::vector<std::string> result;
+  result.reserve(
+      std::distance(base_it, base_end) + std::distance(path_it, path_end));
+
+  // If we have not fully consumed the range of `base` we need to go
+  // up from `path` to reach `base`. Insert ".." into the result.
+  if (base_it != base_end) {
+    for (; base_it != base_end; ++base_it) {
+      result.emplace_back("..");
+    }
+  }
+
+  // Add remaining path components to the result.
+  for (; path_it != path_end; ++path_it) {
+    result.emplace_back(*path_it);
+  }
+
+  return join(result, path_separator);
+}
+
+} // namespace path {
 
 #endif // __STOUT_PATH_HPP__

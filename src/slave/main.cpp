@@ -33,6 +33,7 @@
 
 #include <mesos/slave/resource_estimator.hpp>
 
+#include <process/network.hpp>
 #include <process/owned.hpp>
 #include <process/process.hpp>
 
@@ -41,10 +42,13 @@
 #include <stout/hashset.hpp>
 #include <stout/nothing.hpp>
 #include <stout/os.hpp>
+#include <stout/strings.hpp>
 
 #include <stout/os/permissions.hpp>
 
 #ifdef __linux__
+#include <linux/systemd.hpp>
+
 #include <stout/proc.hpp>
 #endif // __linux__
 
@@ -58,6 +62,7 @@
 
 #include "common/authorization.hpp"
 #include "common/build.hpp"
+#include "common/domain_sockets.hpp"
 #include "common/http.hpp"
 
 #include "hook/manager.hpp"
@@ -74,6 +79,7 @@
 
 #include "module/manager.hpp"
 
+#include "slave/constants.hpp"
 #include "slave/gc.hpp"
 #include "slave/slave.hpp"
 #include "slave/task_status_update_manager.hpp"
@@ -105,6 +111,8 @@ using process::Owned;
 
 using process::firewall::DisabledEndpointsFirewallRule;
 using process::firewall::FirewallRule;
+
+using process::network::unix::Socket;
 
 using std::cerr;
 using std::cout;
@@ -342,6 +350,20 @@ int main(int argc, char** argv)
 
   if (flags.advertise_port.isSome()) {
     os::setenv("LIBPROCESS_ADVERTISE_PORT", flags.advertise_port.get());
+  }
+
+  if (flags.http_executor_domain_sockets) {
+    if (flags.domain_socket_location.isNone()) {
+      flags.domain_socket_location =
+        flags.runtime_dir + "/" + AGENT_EXECUTORS_SOCKET_FILENAME;
+    }
+
+    if (flags.domain_socket_location->size() >=
+        common::DOMAIN_SOCKET_MAX_PATH_LENGTH) {
+      EXIT(EXIT_FAILURE)
+        << "Domain socket location '" << *flags.domain_socket_location << "'"
+        << " must have less than 108 characters.";
+    }
   }
 
   os::setenv("LIBPROCESS_MEMORY_PROFILING", stringify(flags.memory_profiling));
@@ -607,6 +629,74 @@ int main(int argc, char** argv)
   }
 #endif // USE_SSL_SOCKET
 
+  // Create executor domain socket if the user so desires.
+  Option<Socket> executorSocket = None();
+  if (flags.http_executor_domain_sockets) {
+    // If `http_executor_domain_sockets` is true, then the location should have
+    // been set by the user or automatically during startup.
+    CHECK_SOME(flags.domain_socket_location);
+
+    if (strings::startsWith(*flags.domain_socket_location, "systemd:")) {
+      LOG(INFO) << "Expecting domain socket to be passed by systemd";
+
+      // Chop off `systemd:` prefix.
+      std::string name = flags.domain_socket_location->substr(8);
+#ifdef __linux__
+      Try<std::vector<int>> socketFds =
+        systemd::socket_activation::listenFdsWithName(name);
+#else
+      Try<std::vector<int>> socketFds =
+        Try<std::vector<int>>({}); // Dummy to avoid compile errors.
+      EXIT(EXIT_FAILURE)
+        << "Systemd socket passing is only supported on linux.";
+#endif
+
+      if (socketFds.isError()) {
+        EXIT(EXIT_FAILURE)
+          << "Could not get passed file descriptors from systemd: "
+          << socketFds.error();
+      }
+
+      if (socketFds->size() != 1u) {
+        EXIT(EXIT_FAILURE)
+          << "Expected exactly one socket with name " << name
+          << ", got " << socketFds->size() << " instead.";
+      }
+
+      int sockfd = socketFds->at(0);
+
+      // Don't use SSLSocketImpl for unix domain sockets.
+      Try<Socket> socket = Socket::create(
+          sockfd, process::network::internal::SocketImpl::Kind::POLL);
+
+      if (socket.isError()) {
+        EXIT(EXIT_FAILURE)
+          << "Failed to create domain socket: " << socket.error();
+      }
+
+      executorSocket = socket.get();
+
+      // Adjust socket location to point to the *path*, not the systemd
+      // identifier.
+      auto addr = process::network::convert<process::network::unix::Address>(
+          process::network::address(sockfd).get()).get();
+
+      flags.domain_socket_location = addr.path();
+    } else {
+      Try<Socket> socket =
+        common::createDomainSocket(*flags.domain_socket_location);
+
+      if (socket.isError()) {
+        EXIT(EXIT_FAILURE)
+          << "Failed to create domain socket: " << socket.error();
+      }
+
+      executorSocket = socket.get();
+    }
+
+    LOG(INFO) << "Using domain socket at " << *flags.domain_socket_location;
+  }
+
   Slave* slave = new Slave(
       id,
       flags,
@@ -620,6 +710,7 @@ int main(int argc, char** argv)
       secretGenerator,
       volumeGidManager,
       futureTracker.get(),
+      executorSocket,
       authorizer_);
 
   process::spawn(slave);

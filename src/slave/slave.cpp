@@ -162,6 +162,7 @@ using process::Failure;
 using process::Future;
 using process::Owned;
 using process::PID;
+using process::Promise;
 using process::Time;
 using process::UPID;
 
@@ -199,6 +200,7 @@ Slave::Slave(const string& id,
              SecretGenerator* _secretGenerator,
              VolumeGidManager* _volumeGidManager,
              PendingFutureTracker* _futureTracker,
+             const Option<process::network::unix::Socket>& _executorSocket,
              const Option<Authorizer*>& _authorizer)
   : ProcessBase(id),
     state(RECOVERING),
@@ -230,6 +232,7 @@ Slave::Slave(const string& id,
     secretGenerator(_secretGenerator),
     volumeGidManager(_volumeGidManager),
     futureTracker(_futureTracker),
+    executorSocket(_executorSocket),
     authorizer(_authorizer),
     resourceVersion(protobuf::createUUID()) {}
 
@@ -772,6 +775,68 @@ void Slave::initialize()
           return http.api(request, principal);
         },
         options);
+
+  if (executorSocket.isSome()) {
+    // We use `http::Server` to manage the communication channel.
+    // Since `http::Server` currently doesn't offer support for
+    // authentication we then inject the request received by the
+    // server into normal agent rounting logic.
+    Try<http::Server> server = http::Server::create(
+        *executorSocket,
+        process::defer(
+            self(),
+            [this](const process::network::Socket&, http::Request request)
+              -> Future<http::Response> {
+              // Restrict access to only allow `/slave(N)/api/v1/executor`
+              // and `/slave(N)/api/v1`. Executors need to be able to
+              // access the first to subscribe and the latter to e.g.,
+              // launch containers or perform other operator API calls.
+              string selfPrefix = "/" + self().id;
+              if (request.url.path != selfPrefix + "/api/v1/executor" &&
+                  request.url.path != selfPrefix + "/api/v1") {
+                LOG(INFO)
+                  << "Blocking request for " << request.url.path
+                  << " over executor socket";
+                return http::Forbidden();
+              }
+
+              // Create an `HttpEvent` with the needed information which we can
+              // be consumed by the agent. The event contains e.g., the
+              // requested path so the expected route `/api/v1/executor` is
+              // routed when consuming the event.
+              std::unique_ptr<Promise<http::Response>> promise(
+                  new Promise<http::Response>());
+
+              Future<http::Response> response = promise->future();
+
+              process::HttpEvent event(
+                  std::unique_ptr<http::Request>(new http::Request(request)),
+                  std::move(promise));
+
+              std::move(event).consume(this);
+
+              return response;
+            }),
+        {
+          /* .scheme =*/process::http::Scheme::HTTP_UNIX,
+          /* .backlog =*/16384,
+        });
+
+    if (server.isError()) {
+      LOG(FATAL) << "Could not start listening on executor socket: "
+                 << server.error();
+    } else {
+      executorSocketServer = std::move(*server);
+
+      Future<Nothing> executorSocketServerTerminated =
+        executorSocketServer->run();
+
+      if (executorSocketServerTerminated.isFailed()) {
+        LOG(FATAL) << "Could not start listening on executor socket: "
+                   << executorSocketServerTerminated.failure();
+      }
+    }
+  }
 
   route("/api/v1/executor",
         EXECUTOR_HTTP_AUTHENTICATION_REALM,
@@ -11091,6 +11156,13 @@ map<string, string> executorEnvironment(
   environment["MESOS_CHECKPOINT"] = checkpoint ? "1" : "0";
   environment["MESOS_HTTP_COMMAND_EXECUTOR"] =
     flags.http_command_executor ? "1" : "0";
+
+  if (flags.http_executor_domain_sockets) {
+    // If `http_executor_domain_sockets` is true, the location should have
+    // been set either by the user or automatically during agent startup.
+    CHECK(flags.domain_socket_location.isSome());
+    environment["MESOS_DOMAIN_SOCKET"] = *flags.domain_socket_location;
+  }
 
   // Set executor's shutdown grace period. If set, the customized value
   // from `ExecutorInfo` overrides the default from agent flags.

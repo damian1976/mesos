@@ -79,6 +79,7 @@
 #include "internal/devolve.hpp"
 #include "internal/evolve.hpp"
 
+#include "master/authorization.hpp"
 #include "master/constants.hpp"
 #include "master/flags.hpp"
 #include "master/machine.hpp"
@@ -742,171 +743,23 @@ protected:
       const FrameworkInfo& frameworkInfo,
       const process::UPID& from);
 
+  // Returns whether the principal is authorized for the specified
+  // action-object pair.
+  // Returns failure for transient authorization failures.
+  process::Future<bool> authorize(
+      const Option<process::http::authentication::Principal>& principal,
+      authorization::ActionObject&& actionObject);
+
+  // Overload of authorize() for cases which require multiple action-object
+  // pairs to be authorized simultaneously.
+  process::Future<bool> authorize(
+      const Option<process::http::authentication::Principal>& principal,
+      std::vector<authorization::ActionObject>&& actionObjects);
+
   // Returns whether the framework is authorized.
   // Returns failure for transient authorization failures.
   process::Future<bool> authorizeFramework(
       const FrameworkInfo& frameworkInfo);
-
-  // Returns whether the principal is authorized to (re-)register an agent
-  // and whether the `SlaveInfo` is authorized.
-  process::Future<bool> authorizeSlave(
-      const SlaveInfo& slaveInfo,
-      const Option<process::http::authentication::Principal>& principal);
-
-  // Returns whether the task is authorized.
-  // Returns failure for transient authorization failures.
-  process::Future<bool> authorizeTask(
-      const TaskInfo& task,
-      Framework* framework);
-
-  /**
-   * Authorizes a `RESERVE` operation.
-   *
-   * Returns whether the Reserve operation is authorized with the
-   * provided principal. This function is used for authorization of
-   * operations originating from both frameworks and operators. Note
-   * that operations may be validated AFTER authorization, so it's
-   * possible that `reserve` could be malformed.
-   *
-   * @param reserve The `RESERVE` operation to be performed.
-   * @param principal An `Option` containing the principal attempting
-   *     this operation.
-   *
-   * @return A `Future` containing a boolean value representing the
-   *     success or failure of this authorization. A failed `Future`
-   *     implies that validation of the operation did not succeed.
-   */
-  process::Future<bool> authorizeReserveResources(
-      const Offer::Operation::Reserve& reserve,
-      const Option<process::http::authentication::Principal>& principal);
-
-  /**
-   * Authorizes an `UNRESERVE` operation.
-   *
-   * Returns whether the Unreserve operation is authorized with the
-   * provided principal. This function is used for authorization of
-   * operations originating both from frameworks and operators. Note
-   * that operations may be validated AFTER authorization, so it's
-   * possible that `unreserve` could be malformed.
-   *
-   * @param unreserve The `UNRESERVE` operation to be performed.
-   * @param principal An `Option` containing the principal attempting
-   *     this operation.
-   *
-   * @return A `Future` containing a boolean value representing the
-   *     success or failure of this authorization. A failed `Future`
-   *     implies that validation of the operation did not succeed.
-   */
-  process::Future<bool> authorizeUnreserveResources(
-      const Offer::Operation::Unreserve& unreserve,
-      const Option<process::http::authentication::Principal>& principal);
-
-  /**
-   * Authorizes a `CREATE` operation.
-   *
-   * Returns whether the Create operation is authorized with the provided
-   * principal. This function is used for authorization of operations
-   * originating both from frameworks and operators. Note that operations may be
-   * validated AFTER authorization, so it's possible that `create` could be
-   * malformed.
-   *
-   * @param create The `CREATE` operation to be performed.
-   * @param principal An `Option` containing the principal attempting this
-   *     operation.
-   *
-   * @return A `Future` containing a boolean value representing the success or
-   *     failure of this authorization. A failed `Future` implies that
-   *     validation of the operation did not succeed.
-   */
-  process::Future<bool> authorizeCreateVolume(
-      const Offer::Operation::Create& create,
-      const Option<process::http::authentication::Principal>& principal);
-
-  /**
-   * Authorizes a `DESTROY` operation.
-   *
-   * Returns whether the Destroy operation is authorized with the provided
-   * principal. This function is used for authorization of operations
-   * originating both from frameworks and operators. Note that operations may be
-   * validated AFTER authorization, so it's possible that `destroy` could be
-   * malformed.
-   *
-   * @param destroy The `DESTROY` operation to be performed.
-   * @param principal An `Option` containing the principal attempting this
-   *     operation.
-   *
-   * @return A `Future` containing a boolean value representing the success or
-   *     failure of this authorization. A failed `Future` implies that
-   *     validation of the operation did not succeed.
-   */
-  process::Future<bool> authorizeDestroyVolume(
-      const Offer::Operation::Destroy& destroy,
-      const Option<process::http::authentication::Principal>& principal);
-
-  /**
-   * Authorizes resize of a volume triggered by either `GROW_VOLUME` or
-   * `SHRINK_VOLUME` operations.
-   *
-   * Returns whether the triggering operation is authorized with the provided
-   * principal. This function is used for authorization of operations
-   * originating both from frameworks and operators. Note that operations may be
-   * validated AFTER authorization, so it's possible that the operation could be
-   * malformed.
-   *
-   * @param volume The volume being resized.
-   * @param principal An `Option` containing the principal attempting this
-   *     operation.
-   *
-   * @return A `Future` containing a boolean value representing the success or
-   *     failure of this authorization. A failed `Future` implies that
-   *     validation of the operation did not succeed.
-   */
-  process::Future<bool> authorizeResizeVolume(
-      const Resource& volume,
-      const Option<process::http::authentication::Principal>& principal);
-
-
-  /**
-   * Authorizes a `CREATE_DISK` operation.
-   *
-   * Returns whether the `CREATE_DISK` operation is authorized with the
-   * provided principal. This function is used for authorization of operations
-   * originating from frameworks. Note that operations may be validated AFTER
-   * authorization, so it's possible that the operation could be malformed.
-   *
-   * @param createDisk The `CREATE_DISK` operation to be performed.
-   * @param principal An `Option` containing the principal attempting this
-   *     operation.
-   *
-   * @return A `Future` containing a boolean value representing the success or
-   *     failure of this authorization. A failed `Future` implies that
-   *     validation of the operation did not succeed.
-   */
-  process::Future<bool> authorizeCreateDisk(
-      const Offer::Operation::CreateDisk& createDisk,
-      const Option<process::http::authentication::Principal>& principal);
-
-
-  /**
-   * Authorizes a `DESTROY_DISK` operation.
-   *
-   * Returns whether the `DESTROY_DISK` operation is authorized with the
-   * provided principal. This function is used for authorization of operations
-   * originating from frameworks. Note that operations may be validated AFTER
-   * authorization, so it's possible that the operation could be malformed.
-   *
-   * @param destroyDisk The `DESTROY_DISK` operation to be performed.
-   * @param principal An `Option` containing the principal attempting this
-   *     operation.
-   *
-   * @return A `Future` containing a boolean value representing the success or
-   *     failure of this authorization. A failed `Future` implies that
-   *     validation of the operation did not succeed.
-   */
-  process::Future<bool> authorizeDestroyDisk(
-      const Offer::Operation::DestroyDisk& destroyDisk,
-      const Option<process::http::authentication::Principal>& principal);
-
 
   // Determine if a new executor needs to be launched.
   bool isLaunchExecutor (
@@ -1456,32 +1309,115 @@ public:
 
     // /frameworks
     process::http::Response frameworks(
+        ContentType outputContentType,
         const hashmap<std::string, std::string>& queryParameters,
         const process::Owned<ObjectApprovers>& approvers) const;
 
     // /roles
     process::http::Response roles(
+        ContentType outputContentType,
         const hashmap<std::string, std::string>& queryParameters,
         const process::Owned<ObjectApprovers>& approvers) const;
 
     // /slaves
     process::http::Response slaves(
+        ContentType outputContentType,
         const hashmap<std::string, std::string>& queryParameters,
         const process::Owned<ObjectApprovers>& approvers) const;
 
     // /state
     process::http::Response state(
+        ContentType outputContentType,
         const hashmap<std::string, std::string>& queryParameters,
         const process::Owned<ObjectApprovers>& approvers) const;
 
     // /state-summary
     process::http::Response stateSummary(
+        ContentType outputContentType,
         const hashmap<std::string, std::string>& queryParameters,
         const process::Owned<ObjectApprovers>& approvers) const;
 
     // /tasks
     process::http::Response tasks(
+        ContentType outputContentType,
         const hashmap<std::string, std::string>& queryParameters,
+        const process::Owned<ObjectApprovers>& approvers) const;
+
+    // master::Call::GET_STATE
+    process::http::Response getState(
+        ContentType outputContentType,
+        const hashmap<std::string, std::string>& queryParameters,
+        const process::Owned<ObjectApprovers>& approvers) const;
+
+    // master::Call::GET_AGENTS
+    process::http::Response getAgents(
+        ContentType outputContentType,
+        const hashmap<std::string, std::string>& queryParameters,
+        const process::Owned<ObjectApprovers>& approvers) const;
+
+    // master::Call::GET_FRAMEWORKS
+    process::http::Response getFrameworks(
+        ContentType outputContentType,
+        const hashmap<std::string, std::string>& queryParameters,
+        const process::Owned<ObjectApprovers>& approvers) const;
+
+    // master::Call::GET_EXECUTORS
+    process::http::Response getExecutors(
+        ContentType outputContentType,
+        const hashmap<std::string, std::string>& queryParameters,
+        const process::Owned<ObjectApprovers>& approvers) const;
+
+    // master::Call::GET_OPERATIONS
+    process::http::Response getOperations(
+        ContentType outputContentType,
+        const hashmap<std::string, std::string>& queryParameters,
+        const process::Owned<ObjectApprovers>& approvers) const;
+
+    // master::Call::GET_TASKS
+    process::http::Response getTasks(
+        ContentType outputContentType,
+        const hashmap<std::string, std::string>& queryParameters,
+        const process::Owned<ObjectApprovers>& approvers) const;
+
+    // master::Call::GET_ROLES
+    process::http::Response getRoles(
+        ContentType outputContentType,
+        const hashmap<std::string, std::string>& queryParameters,
+        const process::Owned<ObjectApprovers>& approvers) const;
+
+    // TODO(bmahler): These could just live in the .cpp file,
+    // however they are shared with SUBSCRIBE which currently
+    // is not implemented as a read only handler here. Make these
+    // private or only in the .cpp file once SUBSCRIBE is moved
+    // into readonly_handler.cpp.
+    std::string serializeGetState(
+        const process::Owned<ObjectApprovers>& approvers) const;
+    std::string serializeGetAgents(
+        const process::Owned<ObjectApprovers>& approvers) const;
+    std::string serializeGetFrameworks(
+        const process::Owned<ObjectApprovers>& approvers) const;
+    std::string serializeGetExecutors(
+        const process::Owned<ObjectApprovers>& approvers) const;
+    std::string serializeGetOperations(
+        const process::Owned<ObjectApprovers>& approvers) const;
+    std::string serializeGetTasks(
+        const process::Owned<ObjectApprovers>& approvers) const;
+    std::string serializeGetRoles(
+        const process::Owned<ObjectApprovers>& approvers) const;
+
+    std::function<void(JSON::ObjectWriter*)> jsonifyGetState(
+        const process::Owned<ObjectApprovers>& approvers) const;
+    std::function<void(JSON::ObjectWriter*)> jsonifyGetAgents(
+        const process::Owned<ObjectApprovers>& approvers) const;
+    std::function<void(JSON::ObjectWriter*)> jsonifyGetFrameworks(
+        const process::Owned<ObjectApprovers>& approvers) const;
+    std::function<void(JSON::ObjectWriter*)> jsonifyGetExecutors(
+        const process::Owned<ObjectApprovers>& approvers) const;
+    std::function<void(JSON::ObjectWriter*)> jsonifyGetOperations(
+        const process::Owned<ObjectApprovers>& approvers) const;
+    std::function<void(JSON::ObjectWriter*)> jsonifyGetTasks(
+        const process::Owned<ObjectApprovers>& approvers) const;
+    std::function<void(JSON::ObjectWriter*)> jsonifyGetRoles(
         const process::Owned<ObjectApprovers>& approvers) const;
 
   private:
@@ -1778,12 +1714,6 @@ private:
         const mesos::master::Call& call,
         const Option<process::http::authentication::Principal>& principal,
         ContentType contentType) const;
-
-    static std::function<void(JSON::ObjectWriter*)> jsonifyGetAgents(
-        const Master* master,
-        const process::Owned<ObjectApprovers>& approvers);
-    std::string serializeGetAgents(
-        const process::Owned<ObjectApprovers>& approvers) const;
     mesos::master::Response::GetAgents _getAgents(
         const process::Owned<ObjectApprovers>& approvers) const;
 
@@ -1881,12 +1811,6 @@ private:
         const mesos::master::Call& call,
         const Option<process::http::authentication::Principal>& principal,
         ContentType contentType) const;
-
-    static std::function<void(JSON::ObjectWriter*)> jsonifyGetTasks(
-        const Master* master,
-        const process::Owned<ObjectApprovers>& approvers);
-    std::string serializeGetTasks(
-        const process::Owned<ObjectApprovers>& approvers) const;
     mesos::master::Response::GetTasks _getTasks(
         const process::Owned<ObjectApprovers>& approvers) const;
 
@@ -1924,12 +1848,6 @@ private:
         const mesos::master::Call& call,
         const Option<process::http::authentication::Principal>& principal,
         ContentType contentType) const;
-
-    static std::function<void(JSON::ObjectWriter*)> jsonifyGetFrameworks(
-        const Master* master,
-        const process::Owned<ObjectApprovers>& approvers);
-    std::string serializeGetFrameworks(
-        const process::Owned<ObjectApprovers>& approvers) const;
     mesos::master::Response::GetFrameworks _getFrameworks(
         const process::Owned<ObjectApprovers>& approvers) const;
 
@@ -1937,12 +1855,6 @@ private:
         const mesos::master::Call& call,
         const Option<process::http::authentication::Principal>& principal,
         ContentType contentType) const;
-
-    static std::function<void(JSON::ObjectWriter*)> jsonifyGetExecutors(
-        const Master* master,
-        const process::Owned<ObjectApprovers>& approvers);
-    std::string serializeGetExecutors(
-        const process::Owned<ObjectApprovers>& approvers) const;
     mesos::master::Response::GetExecutors _getExecutors(
         const process::Owned<ObjectApprovers>& approvers) const;
 
@@ -1950,12 +1862,6 @@ private:
         const mesos::master::Call& call,
         const Option<process::http::authentication::Principal>& principal,
         ContentType contentType) const;
-
-    static std::function<void(JSON::ObjectWriter*)> jsonifyGetState(
-        const Master* master,
-        const process::Owned<ObjectApprovers>& approvers);
-    std::string serializeGetState(
-        const process::Owned<ObjectApprovers>& approvers) const;
     mesos::master::Response::GetState _getState(
         const process::Owned<ObjectApprovers>& approvers) const;
 
@@ -2011,12 +1917,14 @@ private:
 
     typedef process::http::Response
       (Master::ReadOnlyHandler::*ReadOnlyRequestHandler)(
+          ContentType,
           const hashmap<std::string, std::string>&,
           const process::Owned<ObjectApprovers>&) const;
 
     process::Future<process::http::Response> deferBatchedRequest(
         ReadOnlyRequestHandler handler,
         const Option<process::http::authentication::Principal>& principal,
+        ContentType outputContentType,
         const hashmap<std::string, std::string>& queryParameters,
         const process::Owned<ObjectApprovers>& approvers) const;
 
@@ -2025,6 +1933,7 @@ private:
     struct BatchedRequest
     {
       ReadOnlyRequestHandler handler;
+      ContentType outputContentType;
       hashmap<std::string, std::string> queryParameters;
       Option<process::http::authentication::Principal> principal;
       process::Owned<ObjectApprovers> approvers;
@@ -2831,6 +2740,11 @@ struct Role
 
   hashmap<FrameworkID, Framework*> frameworks;
 };
+
+
+mesos::master::Response::GetFrameworks::Framework model(
+    const Framework& framework);
+
 
 } // namespace master {
 } // namespace internal {

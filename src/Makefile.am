@@ -239,8 +239,10 @@ LIB_LIBSECCOMP = -lseccomp
 endif
 endif
 
+if ENABLE_NVML
 if WITH_BUNDLED_NVML
 MESOS_CPPFLAGS += -I../$(NVML)
+endif
 endif
 
 if WITH_BUNDLED_PICOJSON
@@ -1067,6 +1069,7 @@ libmesos_no_3rdparty_la_SOURCES +=					\
   common/build.hpp							\
   common/command_utils.cpp						\
   common/command_utils.hpp						\
+  common/domain_sockets.hpp						\
   common/future_tracker.hpp						\
   common/heartbeater.hpp						\
   common/http.cpp							\
@@ -1133,6 +1136,8 @@ libmesos_no_3rdparty_la_SOURCES +=					\
   master/allocator/mesos/sorter/random/sorter.hpp				\
   master/allocator/mesos/sorter/random/utils.hpp				\
   master/allocator/mesos/sorter/sorter.hpp					\
+  master/authorization.cpp						\
+  master/authorization.hpp						\
   master/constants.cpp							\
   master/constants.hpp							\
   master/contender/contender.cpp					\
